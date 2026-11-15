@@ -6,6 +6,8 @@
 //! byte-for-byte results are unchanged; `codewhale-config::persistence`
 //! re-exports these items to keep its public API stable.
 
+use std::borrow::Cow;
+
 /// Hints that mark a config/JSON/env key as carrying a secret value.
 ///
 /// Compound hints (`api_key`, `client_secret`) match as a substring of the
@@ -477,7 +479,7 @@ fn redact_private_key_line(
         rest_of_input,
     )?;
     Some(PrivateKeyLine {
-        text: redact_line(&format!("{masked}{newline}"), policy),
+        text: redact_line(&format!("{masked}{newline}"), policy).into_owned(),
         opens_block,
     })
 }
@@ -536,7 +538,7 @@ fn pop_sanitize_containers(containers: &mut Vec<SanitizeContainerArm>, token: &s
 }
 
 /// Redact a single line (which may include a trailing newline).
-fn redact_line(line: &str, policy: RedactionPolicy) -> String {
+fn redact_line(line: &str, policy: RedactionPolicy) -> Cow<'_, str> {
     // Preserve any trailing newline so callers keep their line structure.
     let (body, newline) = match line.strip_suffix('\n') {
         Some(rest) => (rest, "\n"),
@@ -544,7 +546,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
     };
 
     if let Some(redacted) = redact_keyed_assignment(body, policy) {
-        return format!("{redacted}{newline}");
+        return format!("{redacted}{newline}").into();
     }
 
     // Inline-assignment / bare-token pass: mask any whitespace-delimited word
@@ -555,14 +557,14 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
     let mut spaced = SpacedAssignment::None;
     let mut containers: Vec<SanitizeContainerArm> = Vec::new();
     let (words, seps) = split_horizontal_whitespace_preserving(body);
-    let mut masked: Vec<String> = Vec::with_capacity(words.len());
+    let mut masked: Vec<Cow<'_, str>> = Vec::with_capacity(words.len());
     for word in &words {
         let trimmed = trim_word_punctuation(word);
         if let SpacedAssignment::FlagValue(sensitivity) = spaced
             && !trimmed.is_empty()
         {
             if matches!(trimmed, "=" | ":") {
-                masked.push((*word).to_string());
+                masked.push(Cow::Borrowed(word));
                 spaced = SpacedAssignment::AwaitingValue(sensitivity);
                 continue;
             }
@@ -573,7 +575,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
                 && ((policy == RedactionPolicy::KeyBased && sensitivity == KeySensitivity::Certain)
                     || value_looks_like_credential(target))
             {
-                masked.push(word.replacen(target, REDACTED, 1));
+                masked.push(word.replacen(target, REDACTED, 1).into());
                 changed = true;
                 continue;
             }
@@ -596,7 +598,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
                         } else {
                             SpacedAssignment::AwaitingValue(sensitivity)
                         };
-                        masked.push((*word).to_string());
+                        masked.push(Cow::Borrowed(word));
                         continue;
                     }
                 }
@@ -612,7 +614,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
                     .map_or(SpacedAssignment::None, |c| {
                         SpacedAssignment::AwaitingValue(c.sensitivity)
                     });
-                masked.push((*word).to_string());
+                masked.push(Cow::Borrowed(word));
                 continue;
             }
             if let Some(container) = containers.last()
@@ -620,7 +622,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
                 && trimmed.ends_with(':')
                 && !trimmed.ends_with("://")
             {
-                masked.push((*word).to_string());
+                masked.push(Cow::Borrowed(word));
                 spaced = SpacedAssignment::AwaitingValue(container.sensitivity);
                 continue;
             }
@@ -634,7 +636,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
                     // The value may run to the end of the line, so drop the
                     // remainder rather than masking one word and leaking the
                     // rest.
-                    masked.push(REDACTED.to_string());
+                    masked.push(Cow::Borrowed(REDACTED));
                     changed = true;
                     break;
                 }
@@ -644,17 +646,17 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
                     // word (`Bearer`) keeps the assignment open for its token.
                     let core = credential_word_core(trimmed);
                     if is_auth_scheme_word(core) {
-                        masked.push((*word).to_string());
+                        masked.push(Cow::Borrowed(word));
                         continue;
                     }
                     if value_looks_like_credential(core) {
-                        masked.push(word.replacen(core, REDACTED, 1));
+                        masked.push(word.replacen(core, REDACTED, 1).into());
                         changed = true;
                     } else if let Some(redacted) = mask_bare_secret_tokens(word, REDACTED) {
-                        masked.push(redacted);
+                        masked.push(redacted.into());
                         changed = true;
                     } else {
-                        masked.push((*word).to_string());
+                        masked.push(Cow::Borrowed(word));
                     }
                     pop_sanitize_containers(&mut containers, word);
                     spaced = containers
@@ -679,7 +681,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
                     .map_or(SpacedAssignment::None, |c| {
                         SpacedAssignment::AwaitingValue(c.sensitivity)
                     });
-                masked.push((*word).to_string());
+                masked.push(Cow::Borrowed(word));
                 continue;
             }
             if container.in_object
@@ -687,7 +689,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
                 && !trimmed.ends_with("://")
                 && !trimmed[..trimmed.len() - 1].contains(['=', ':'])
             {
-                masked.push((*word).to_string());
+                masked.push(Cow::Borrowed(word));
                 spaced = SpacedAssignment::AwaitingValue(container.sensitivity);
                 continue;
             }
@@ -697,7 +699,7 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
             && let Some(redacted) = redact_inline_keyed_assignment(trimmed, policy)
         {
             changed = true;
-            masked.push(word.replace(trimmed, &redacted));
+            masked.push(word.replace(trimmed, &redacted).into());
             spaced = next_spaced;
             if matches!(spaced, SpacedAssignment::None) {
                 pop_sanitize_containers(&mut containers, word);
@@ -709,23 +711,24 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
         }
         if let Some(redacted) = redact_inline_keyed_assignment(trimmed, policy) {
             changed = true;
-            masked.push(word.replace(trimmed, &redacted));
+            masked.push(word.replace(trimmed, &redacted).into());
             spaced = SpacedAssignment::None;
         } else if let Some(core) = secret_token_core(trimmed) {
             changed = true;
-            masked.push(word.replacen(core, REDACTED, 1));
+            masked.push(word.replacen(core, REDACTED, 1).into());
             spaced = SpacedAssignment::None;
         } else if let Some(redacted) = redact_structured_word(trimmed, policy) {
             changed = true;
-            masked.push(word.replace(trimmed, &redacted));
+            masked.push(word.replace(trimmed, &redacted).into());
             spaced = SpacedAssignment::None;
         } else if let Some(redacted) = mask_bare_secret_tokens(word, REDACTED) {
             changed = true;
-            masked.push(redacted);
+            masked.push(redacted.into());
             spaced = SpacedAssignment::None;
         } else {
-            masked.push((*word).to_string());
-            spaced = spaced.advance(trimmed);
+            masked.push(Cow::Borrowed(word));
+            // `spaced` has not changed since `next_spaced` was computed.
+            spaced = next_spaced;
         }
     }
 
@@ -739,9 +742,9 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
             }
         }
         out.push_str(newline);
-        out
+        out.into()
     } else {
-        format!("{body}{newline}")
+        Cow::Borrowed(line)
     }
 }
 
@@ -997,6 +1000,11 @@ fn is_token_metric_name(key_norm: &str) -> bool {
 /// Classify how strongly `raw` names a credential rather than prose or a token metric.
 #[must_use]
 pub fn key_sensitivity(raw: &str) -> KeySensitivity {
+    // Nearly every word offered here is ordinary code or prose. Skip the
+    // normalizing allocation and the hint scan when no hint can match.
+    if !may_hold_sensitive_hint(raw) {
+        return KeySensitivity::None;
+    }
     let key_norm = normalize_sensitive_key(raw);
     // `Authorization failed: <reason>` is a status label, not a credential
     // key; masking it hid every provider refusal reason (xAI's out-of-credits
@@ -1044,6 +1052,28 @@ pub fn key_sensitivity(raw: &str) -> KeySensitivity {
         }
     }
     KeySensitivity::None
+}
+
+/// Fragments of which every [`SENSITIVE_KEY_HINTS`] entry and the `token`
+/// family contain at least one.
+const SENSITIVE_HINT_FRAGMENTS: &[&[u8]] =
+    &[b"key", b"secret", b"token", b"passw", b"authorization"];
+
+/// Cheap pre-check for [`key_sensitivity`]: `false` only when no sensitive
+/// hint can match `raw`.
+///
+/// [`normalize_sensitive_key`] lowercases ASCII letters and only ever adds
+/// `_` between them, so a hint inside the normalized key is also inside `raw`,
+/// ignoring ASCII case.
+fn may_hold_sensitive_hint(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    (0..bytes.len()).any(|start| {
+        SENSITIVE_HINT_FRAGMENTS.iter().any(|fragment| {
+            bytes
+                .get(start..start + fragment.len())
+                .is_some_and(|window| window.eq_ignore_ascii_case(fragment))
+        })
+    })
 }
 
 /// Whether `raw`, normalized the way a config/env/JSON key is, matches a
@@ -1656,7 +1686,14 @@ fn secret_token_core(word: &str) -> Option<&str> {
     (!core.is_empty() && is_bare_secret_token(core)).then_some(core)
 }
 
+/// The shortest word any rule in [`is_bare_secret_token`] accepts: a JWT with
+/// a one-character signature. Prefixed keys and AWS key ids are longer.
+const MIN_BARE_SECRET_TOKEN_LEN: usize = "eyJ.eyJ.x".len();
+
 fn is_bare_secret_token(word: &str) -> bool {
+    if word.len() < MIN_BARE_SECRET_TOKEN_LEN {
+        return false;
+    }
     SECRET_TOKEN_PREFIXES
         .iter()
         .any(|p| word.len() > p.len() + 6 && word.starts_with(p))
@@ -1734,6 +1771,10 @@ pub fn mask_bare_secret_tokens(text: &str, placeholder: &str) -> Option<String> 
                 .then(|| credential_core(after_escape(body)))
                 .flatten()
         })
+    }
+    // Every candidate core is a slice of `text`.
+    if text.len() < MIN_BARE_SECRET_TOKEN_LEN {
+        return None;
     }
     let mut escaped = false;
     let mut found = false;
@@ -1854,6 +1895,18 @@ mod bare_token_tests {
     }
 
     #[test]
+    fn the_length_gate_admits_the_shortest_bare_token() {
+        // A one-character-signature JWT is the shortest word any rule accepts.
+        let jwt = ["eyJ", ".eyJ", ".x"].concat();
+        assert_eq!(jwt.len(), MIN_BARE_SECRET_TOKEN_LEN);
+        assert!(is_bare_secret_token(&jwt));
+        assert_eq!(redact_secrets(&format!("got {jwt}")), "got [redacted]");
+        for prefix in SECRET_TOKEN_PREFIXES {
+            assert!(prefix.len() + 7 >= MIN_BARE_SECRET_TOKEN_LEN, "{prefix}");
+        }
+    }
+
+    #[test]
     fn a_bare_token_wrapped_in_markdown_or_prose_punctuation_is_masked() {
         let body = "Z7qX4mNb2Vc9Lk3PwR8t";
         let aws = ["AKIA", "Z7QX4MNB2VC9LK3P"].concat();
@@ -1915,6 +1968,33 @@ mod assigned_secret_tests {
 
     fn both_policies(input: &str) -> [String; 2] {
         [redact_secrets(input), redact_model_bound_secrets(input)]
+    }
+
+    #[test]
+    fn every_sensitive_hint_passes_the_key_pre_check() {
+        for hint in SENSITIVE_KEY_HINTS {
+            assert!(may_hold_sensitive_hint(hint), "{hint}");
+            assert!(key_sensitivity(hint).is_armed(), "{hint}");
+            let upper = hint.to_ascii_uppercase();
+            assert!(key_sensitivity(&upper).is_armed(), "{upper}");
+        }
+        for key in [
+            "apiKey",
+            "accessToken",
+            "clientSecret",
+            "DBPassword",
+            "X-Api-Key",
+        ] {
+            assert!(key_sensitivity(key).is_armed(), "{key}");
+        }
+        for word in [
+            "let",
+            "String::with_capacity(input.len());",
+            "keys",
+            "max_tokens",
+        ] {
+            assert_eq!(key_sensitivity(word), KeySensitivity::None, "{word}");
+        }
     }
 
     #[test]
